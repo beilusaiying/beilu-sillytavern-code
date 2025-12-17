@@ -1,0 +1,1327 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>贝露的美化界面 (深度注释版)</title>
+
+    <!--
+      ==================================================================================
+      == 核心集成机制与架构总览 (Core Integration and Architecture)
+      ==================================================================================
+      1. 集成机制 (Integration Mechanism):
+         - 本文件通过 SillyTavern 的“正则脚本 (Regex Scripting)”功能注入到聊天界面中。
+         - SillyTavern 会在AI的输出中查找特定的标签，例如 <game_txt>...</game_txt>。
+         - 找到后，SillyTavern 会用这个HTML文件的 *全部内容* 替换掉 <game_txt> 标签本身。
+         - 脚本内部的 `const rawGameTxt = ref(`$1`);` 这行代码是关键，$1 会被 SillyTavern 替换为 <game_txt> 标签 *内部* 的原始文本。
+         - 这就完成了从 SillyTavern 到本 Vue 应用的单向数据注入。
+
+      2. 架构模式 (MVU - Model-View-Update):
+         本项目遵循了“酒馆助手 (Tavern Helper)”官方推荐的 MVU 设计模式，这是一种非常适合响应式UI的架构。
+         - Model (模型): 由 Vue 的 `reactive` API 创建的 `state` 对象。它是应用所有数据的唯一真实来源 (Single Source of Truth)。
+         - View (视图): HTML模板部分以及所有的 Vue 组件 (`<progress-bar>`, `<companion-card>` 等)。它们负责以声明式的方式“展示” Model 中的数据。
+         - Update (更新): `parseGameTxt` 函数和所有在 `setup()` 中定义的 methods (如 `useSkill`, `togglePopup`)。它们负责根据来自 SillyTavern 的原始输入或用户的交互来“更新” Model。当 Model 更新后，Vue 会自动重新渲染 View。
+    -->
+
+    <!-- 引入外部库：Vue.js 用于构建响应式UI，GSAP 用于实现流畅的动画效果。 -->
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/gsap.min.js"></script>
+
+    <style>
+      /* --- 字体与基础变量定义 --- */
+      @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700&family=Inter:wght@300;400;500;700&family=Orbitron:wght@400;700&family=Roboto+Mono:wght@400;500&display=swap');
+
+      /*
+         * CSS自定义属性（变量）系统：
+         * 这种设计使得主题颜色、字体和布局的统一管理和修改变得非常方便。
+         * 整个UI的美学风格都由此处的变量驱动。
+         */
+      :root {
+        /* 魔法少女主题色板 */
+        --theme-bg: #fdf6fa; /* 柔和的乳白/淡粉背景，营造梦幻感 */
+        --panel-bg-frosted-blue: rgba(220, 230, 255, 0.7); /* 蓝色毛玻璃效果，用于次要元素 */
+        --text-primary: #4a4a6a; /* 暗紫灰色，在淡色背景上保证足够的可读性 */
+        --text-secondary: #7a7a9a; /* 用于辅助性文字 */
+        --text-on-grad: #ffffff; /* 用于渐变背景上的文字，保证对比度 */
+        --border-color: rgba(180, 180, 220, 0.4); /* 统一的边框颜色 */
+        --shadow-light: rgba(100, 110, 180, 0.1); /* 统一的浅阴影 */
+        --shadow-medium: rgba(100, 110, 180, 0.15); /* 统一的中等阴影 */
+
+        /* 各面板和按钮的专属渐变色，赋予每个功能区独特的视觉标识 */
+        --grad-status: linear-gradient(120deg, #9fd6ff 0%, #ffb8e3 100%);
+        --grad-inventory: linear-gradient(120deg, #a8c5ff 0%, #c9a8ff 100%);
+        --grad-combat: linear-gradient(120deg, #ff8ba0 0%, #ffb8c8 100%);
+        --grad-companion: linear-gradient(120deg, #ffb5e3 0%, #d8b8ff 100%);
+        --grad-enemy: linear-gradient(120deg, #d56a6a 0%, #b8745b 100%);
+
+        /* 与渐变色配套的面板边框颜色 */
+        --border-status: #9fd6ff;
+        --border-inventory: #a8c5ff;
+        --border-combat: #ff8ba0;
+        --border-companion: #ffb5e3;
+        --border-enemy: #d56a6a;
+
+        /* 丘比风格底部栏的专属颜色 */
+        --qb-bg: #fffafc;
+        --qb-eye-color: #ff8a9a;
+
+        /* 强调色与进度条颜色 */
+        --accent-pink: #ff6bab;
+        --accent-blue: #6b8cff;
+        --accent-red: #ff6b6b;
+        --accent-green: #42b983;
+        --progress-bg: rgba(0, 0, 0, 0.07); /* 进度条背景色 */
+        /* 各种不同用途的进度条填充色 */
+        --progress-my-hp-bar: linear-gradient(90deg, #ff7ab4, #ffaccf);
+        --progress-my-mp-bar: linear-gradient(90deg, #6b8cff, #a8c0ff);
+        --progress-my-soul-bar: linear-gradient(90deg, #f0f4f8, #d6e0ff);
+        --progress-enemy-hp-bar: linear-gradient(90deg, var(--accent-red), #a73c4e);
+        --progress-comp-aff-bar: linear-gradient(90deg, #ffdb6b, #fff0b8);
+
+        /* 统一字体定义 */
+        --font-main: 'Inter', 'Noto Sans SC', sans-serif; /* 主要内容字体 */
+        --font-title: 'Orbitron', 'Noto Sans SC', sans-serif; /* 标题字体，有科技感 */
+        --font-numeric: 'Roboto Mono', 'monospace'; /* 数字和代码字体，保证等宽对齐 */
+      }
+
+      /* --- 动画关键帧定义 --- */
+      @keyframes gentle-pulse {
+        0%,
+        100% {
+          box-shadow:
+            0 0 5px rgba(255, 171, 207, 0),
+            0 0 7px rgba(255, 171, 207, 0);
+        }
+        50% {
+          box-shadow:
+            0 0 10px rgba(255, 171, 207, 0.5),
+            0 0 15px rgba(255, 171, 207, 0.4);
+        }
+      }
+      /* 用于数值增加时的“闪烁”动画 */
+      @keyframes flash-green {
+        0% {
+          color: var(--accent-green);
+          transform: scale(1.25);
+        }
+        100% {
+          color: var(--text-primary);
+          transform: scale(1);
+        }
+      }
+      /* 用于数值减少时的“闪烁”动画 */
+      @keyframes flash-red {
+        0% {
+          color: var(--accent-red);
+          transform: scale(1.25);
+        }
+        100% {
+          color: var(--text-primary);
+          transform: scale(1);
+        }
+      }
+
+      /* --- 基础布局与样式 --- */
+      body {
+        margin: 0;
+        padding: 0;
+        background-color: var(--theme-bg);
+        font-family: var(--font-main);
+        color: var(--text-primary);
+        line-height: 1.6;
+      }
+      #app {
+        transition: opacity 0.5s ease;
+      }
+
+      /* --- Vue 过渡动画 --- */
+      .v-enter-active,
+      .v-leave-active {
+        transition:
+          opacity 0.4s ease,
+          transform 0.4s cubic-bezier(0.25, 0.8, 0.25, 1);
+      }
+      .v-enter-from,
+      .v-leave-to {
+        opacity: 0;
+        transform: translateY(20px);
+      }
+      .list-move,
+      .list-enter-active,
+      .list-leave-active {
+        transition: all 0.5s cubic-bezier(0.55, 0, 0.1, 1);
+      }
+      .list-enter-from,
+      .list-leave-to {
+        opacity: 0;
+        transform: scale(0.9);
+      }
+      .list-leave-active {
+        position: absolute;
+      }
+
+      /* --- 主要UI组件样式 (美化版) --- */
+      .top-nav {
+        display: flex;
+        justify-content: stretch;
+        padding: 8px;
+        background: rgba(255, 255, 255, 0.7);
+        backdrop-filter: blur(8px);
+        border-bottom: 1px solid var(--border-color);
+        box-shadow: 0 2px 10px var(--shadow-light);
+        position: sticky;
+        top: 0;
+        z-index: 100;
+      }
+      .nav-button {
+        flex-grow: 1;
+        border: none;
+        border-radius: 8px;
+        background-color: transparent;
+        color: var(--text-secondary);
+        font-size: 0.9em;
+        font-weight: 500;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: all 0.3s ease;
+        padding: 10px 5px;
+        gap: 8px;
+        position: relative;
+        overflow: hidden;
+      }
+      .nav-button .icon {
+        font-size: 1.4em;
+        transition: transform 0.3s ease;
+      }
+      .nav-button:hover {
+        color: var(--text-primary);
+      }
+      .nav-button:hover .icon {
+        transform: scale(1.1);
+      }
+      .nav-button.active {
+        color: var(--text-on-grad);
+        font-weight: 700;
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+      }
+      /* 为每个激活的按钮应用其专属的渐变背景 */
+      .nav-button.active[data-popup='popup-user-status'] {
+        background: var(--grad-status);
+      }
+      .nav-button.active[data-popup='popup-user-inventory'] {
+        background: var(--grad-inventory);
+      }
+      .nav-button.active[data-popup='popup-combat'] {
+        background: var(--grad-combat);
+      }
+      .nav-button.active[data-popup='popup-companions'] {
+        background: var(--grad-companion);
+      }
+      .nav-button.active[data-popup='popup-enemies'] {
+        background: var(--grad-enemy);
+      }
+      .nav-button.active[data-popup='popup-debug'],
+      .nav-button.active[data-popup='popup-settings'] {
+        background: var(--grad-inventory);
+      }
+
+      .info-bar {
+        padding: 8px 15px;
+        background: rgba(255, 255, 255, 0.5);
+        border-bottom: 1px solid var(--border-color);
+        font-size: 0.9em;
+        color: var(--text-secondary);
+        text-align: center;
+        white-space: pre-wrap;
+      }
+      .main-content {
+        background: #fff;
+        border-radius: 12px;
+        padding: 24px;
+        box-shadow: 0 4px 20px var(--shadow-light);
+        border: 1px solid var(--border-color);
+        margin: 20px;
+        white-space: pre-wrap;
+        min-height: 40vh;
+      }
+      .content-container {
+        padding-bottom: 80px; /* 为底部固定按钮和安全区域留出空间，并增加额外间距 */
+      }
+      .popup-overlay {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0, 0, 0, 0.4);
+        backdrop-filter: blur(4px);
+        z-index: 1000;
+      }
+      .popup-panel {
+        position: fixed;
+        left: 0;
+        width: 100%;
+        max-height: 85vh;
+        z-index: 1001;
+        display: flex;
+        flex-direction: column;
+        box-shadow: 0 5px 30px rgba(100, 120, 200, 0.2);
+        border: 2px solid;
+        transition:
+          background 0.4s ease,
+          border-color 0.4s ease;
+        background: #fff;
+        border-color: var(--border-color);
+      }
+      /* 为每个面板应用独特的渐变背景和边框，增强视觉区分度 */
+      .popup-panel.popup-user-status {
+        background: var(--grad-status);
+        border-color: var(--border-status);
+      }
+      .popup-panel.popup-user-inventory {
+        background: var(--grad-inventory);
+        border-color: var(--border-inventory);
+      }
+      .popup-panel.popup-combat {
+        background: var(--grad-combat);
+        border-color: var(--border-combat);
+      }
+      .popup-panel.popup-companions {
+        background: var(--grad-companion);
+        border-color: var(--border-companion);
+      }
+      .popup-panel.popup-enemies {
+        background: var(--grad-enemy);
+        border-color: var(--border-enemy);
+      }
+      .popup-panel.popup-debug,
+      .popup-panel.popup-settings {
+        background: var(--grad-inventory);
+        border-color: var(--border-inventory);
+      }
+
+      .popup-panel.top-down {
+        top: 0;
+        border-bottom-left-radius: 20px;
+        border-bottom-right-radius: 20px;
+      }
+      .popup-panel.bottom-up {
+        bottom: 0;
+        border-top-left-radius: 20px;
+        border-top-right-radius: 20px;
+      }
+
+      .popup-header {
+        padding: 15px 20px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.3);
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        flex-shrink: 0;
+      }
+      .popup-title {
+        font-size: 1.2em;
+        font-weight: 700;
+        font-family: var(--font-title);
+        color: var(--text-on-grad);
+        text-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+      }
+      .popup-close-btn {
+        font-size: 1.5em;
+        font-weight: bold;
+        color: var(--text-on-grad);
+        cursor: pointer;
+        padding: 5px;
+        line-height: 1;
+        transition: transform 0.2s ease;
+        text-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+      }
+      .popup-close-btn:hover {
+        transform: scale(1.2);
+        color: #fff;
+      }
+      .popup-content {
+        padding: 20px;
+        overflow-y: auto;
+        flex-grow: 1;
+        background: rgba(255, 255, 255, 0.8);
+        border-radius: 0 0 18px 18px;
+      }
+      .bottom-bar {
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        width: 100%;
+        display: flex;
+        justify-content: center;
+        padding: 0;
+        padding-bottom: env(safe-area-inset-bottom);
+        z-index: 100;
+        pointer-events: none;
+      }
+      .bottom-popup-button {
+        width: 100%;
+        max-width: 100%;
+        padding: 12px 20px;
+        background-color: var(--qb-bg);
+        border: none;
+        border-top: 1px solid var(--border-color);
+        box-shadow: 0 -4px 20px var(--shadow-light);
+        color: var(--text-primary);
+        font-weight: 600;
+        cursor: pointer;
+        text-align: center;
+        transition: all 0.3s ease;
+        pointer-events: auto;
+        position: relative;
+      }
+      .bottom-popup-button:hover {
+        transform: translateY(-3px);
+        box-shadow: 0 -6px 25px var(--shadow-medium);
+      }
+      /* 丘比(QB)风格的眼睛装饰，增加趣味性 */
+      .bottom-popup-button::before,
+      .bottom-popup-button::after {
+        content: '';
+        position: absolute;
+        top: 50%;
+        transform: translateY(-50%);
+        width: 8px;
+        height: 8px;
+        background-color: var(--qb-eye-color);
+        border-radius: 50%;
+        box-shadow: 0 0 5px var(--qb-eye-color);
+      }
+      .bottom-popup-button::before {
+        left: 35%;
+      }
+      .bottom-popup-button::after {
+        right: 35%;
+      }
+
+      .data-item {
+        margin-bottom: 12px;
+        padding-bottom: 12px;
+        border-bottom: 1px solid var(--border-color);
+        font-size: 0.95em;
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .data-item:last-child {
+        border-bottom: none;
+      }
+      .data-item strong {
+        width: 100px;
+        color: var(--text-primary);
+        font-weight: 500;
+        margin-right: 10px;
+        flex-shrink: 0;
+      }
+      .data-item span.value {
+        color: var(--text-primary);
+        font-weight: 500;
+        flex-grow: 1;
+        word-break: break-word;
+        white-space: pre-wrap;
+      }
+      .progress-bar-container {
+        flex-grow: 1;
+        height: 18px;
+        background-color: var(--progress-bg);
+        border-radius: 9px;
+        overflow: hidden;
+        position: relative;
+        box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.1);
+        border: 1px solid rgba(0, 0, 0, 0.05);
+      }
+      .progress-bar-fill {
+        height: 100%;
+        border-radius: 9px;
+        transition: width 0.6s cubic-bezier(0.25, 0.1, 0.25, 1);
+      }
+      .progress-bar-text {
+        position: absolute;
+        right: 10px;
+        top: 50%;
+        transform: translateY(-50%);
+        font-size: 0.8em;
+        font-weight: 600;
+        color: #fff;
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+        font-family: var(--font-numeric);
+      }
+      .card-block {
+        background: linear-gradient(150deg, rgba(255, 255, 255, 0.9), rgba(245, 250, 255, 0.95));
+        border-radius: 12px;
+        padding: 15px;
+        margin-bottom: 20px;
+        box-shadow: 0 4px 15px var(--shadow-light);
+        position: relative;
+        overflow: hidden;
+        transition: all 0.3s ease;
+        animation: gentle-pulse 4s infinite ease-in-out;
+      }
+      .card-block h4 {
+        margin: -15px -15px 15px -15px;
+        padding: 10px 15px;
+        color: var(--text-on-grad);
+        font-size: 1.1em;
+        font-weight: 600;
+        text-align: center;
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+        border-radius: 12px 12px 0 0;
+      }
+      .companion-card {
+        border: 1px solid var(--accent-pink);
+      }
+      .companion-card h4 {
+        background: var(--grad-companion);
+      }
+      .enemy-card {
+        border: 1px solid var(--grad-enemy-border);
+      }
+      .enemy-card h4 {
+        background: var(--grad-enemy);
+      }
+      .no-data-message {
+        color: var(--text-secondary);
+        font-style: italic;
+        text-align: center;
+        padding: 30px 20px;
+      }
+      .tip-item {
+        background-color: #fff;
+        border: 1px solid var(--border-color);
+        border-left: 4px solid var(--accent-blue);
+        border-radius: 8px;
+        padding: 12px 15px;
+        margin-bottom: 12px;
+        box-shadow: 0 2px 5px var(--shadow-light);
+      }
+      .tip-item.clickable {
+        cursor: pointer;
+        transition: all 0.2s ease;
+      }
+      .tip-item.clickable:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 12px var(--shadow-medium);
+        border-left-color: var(--accent-pink);
+      }
+      .tip-header {
+        font-size: 0.85em;
+        color: var(--text-secondary);
+        margin-bottom: 8px;
+        font-weight: 500;
+      }
+      .tip-content {
+        font-size: 0.95em;
+        color: var(--text-primary);
+        line-height: 1.6;
+        white-space: pre-wrap;
+      }
+      .debug-panel {
+        font-family: var(--font-numeric);
+        font-size: 0.85em;
+      }
+      .debug-panel pre {
+        background-color: #2c3e50;
+        color: #f8f8f2;
+        padding: 15px;
+        border-radius: 8px;
+        white-space: pre-wrap;
+        word-break: break-all;
+      }
+      .value-display {
+        transition: all 0.3s ease;
+        display: inline-block;
+      }
+      .value-changed-up {
+        animation: flash-green 0.7s ease-out;
+      }
+      .value-changed-down {
+        animation: flash-red 0.7s ease-out;
+      }
+
+      /* --- 可交互物品/技能按钮样式 --- */
+      .inventory-items,
+      .combat-items {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+      .item-list {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 8px;
+        margin-top: 8px;
+        width: 100%;
+      }
+      .item-button {
+        background: linear-gradient(145deg, #f9faff, #f2f5ff);
+        border: 1px solid var(--border-color);
+        border-radius: 8px;
+        padding: 8px 14px;
+        font-family: var(--font-main);
+        font-size: 0.9em;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        text-align: left;
+        width: 100%;
+        box-shadow: 0 1px 3px var(--shadow-light);
+      }
+      .item-button:hover {
+        background: linear-gradient(145deg, #ffffff, #f7f9ff);
+        border-color: var(--accent-blue);
+        color: var(--accent-blue);
+        transform: translateY(-2px);
+        box-shadow: 0 4px 10px var(--shadow-medium);
+      }
+      .item-button:disabled {
+        background-color: #e9ecef;
+        color: #adb5bd;
+        cursor: not-allowed;
+        transform: none;
+        border-color: var(--border-color);
+      }
+      .item-button:disabled:hover {
+        background-color: #e9ecef;
+        color: #adb5bd;
+      }
+
+      /* --- 设置面板样式 --- */
+      .settings-panel .setting-item {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 10px 0;
+        border-bottom: 1px solid var(--border-color);
+      }
+      .settings-panel .setting-item:last-child {
+        border-bottom: none;
+      }
+      .settings-panel .toggle-button {
+        padding: 4px 12px;
+        border: 1px solid var(--border-color);
+        border-radius: 6px;
+        cursor: pointer;
+        font-weight: 500;
+        transition: all 0.2s ease;
+        min-width: 60px;
+        text-align: center;
+      }
+      .settings-panel .toggle-button.on {
+        background-color: var(--accent-green);
+        color: white;
+        border-color: var(--accent-green);
+      }
+      .settings-panel .toggle-button.off {
+        background-color: var(--text-secondary);
+        color: white;
+        border-color: var(--text-secondary);
+      }
+    </style>
+  </head>
+  <body>
+    <!-- Vue 应用的根节点, Vue实例将挂载到这里 -->
+    <div id="app">
+      <!-- 顶部导航栏 (View的一部分) -->
+      <div class="top-nav">
+        <!-- 使用 v-for 循环遍历 navButtons 数组来动态生成按钮 -->
+        <template v-for="button in navButtons" :key="button.id">
+          <!-- v-if 指令根据 uiSettings 中的可见性设置来决定是否渲染此按钮 -->
+          <button
+            v-if="uiSettings[button.id]?.visible ?? true"
+            class="nav-button"
+            :class="{ active: activePopup === button.popupId }"
+            :data-popup="button.popupId"
+            @click="togglePopup(button.popupId)"
+          >
+            <span class="icon">{{ button.icon }}</span>{{ button.label }}
+          </button>
+        </template>
+      </div>
+
+      <!-- 中间的信息栏 (View的一部分), 用于显示时间、地点等系统信息 -->
+      <div class="info-bar">
+        <span v-if="state.system.time || state.system.location || state.system.plot"> {{ formatSystemInfo }} </span>
+        <span v-else>系统信息加载中...</span>
+      </div>
+
+      <!-- 主要内容显示区域 (View的一部分) -->
+      <div class="content-container">
+        <div class="main-content">{{ state.mainContent }}</div>
+      </div>
+
+      <!-- 弹出面板 (View的一部分) -->
+      <!-- 遮罩层 -->
+      <Transition>
+        <div v-if="activePopup" class="popup-overlay" @click="closePopup"></div>
+      </Transition>
+      <!-- 面板本身 -->
+      <Transition>
+        <popup-panel
+          v-if="activePopup"
+          :is-active="!!activePopup"
+          :position="getPopupPosition(activePopup)"
+          :popup-id="activePopup"
+          @close="closePopup"
+        >
+          <!-- 使用插槽(slot)将标题和内容动态传入 popup-panel 组件 -->
+          <template #title>{{ getPopupTitle(activePopup) }}</template>
+          <template #content>
+            <!-- 根据 activePopup 的值，条件性地渲染不同的面板内容 -->
+
+            <!-- 用户状态面板 -->
+            <div v-if="activePopup === 'popup-user-status'">
+              <div class="data-item">
+                <strong>轮回次数:</strong>
+                <span class="value value-display" ref="loopCountValueRef"
+                  >{{ state.userStatus.loopCount || 'N/A' }}</span
+                >
+              </div>
+              <div class="data-item">
+                <strong>轮回天数:</strong>
+                <span class="value value-display" ref="loopDaysValueRef">{{ state.userStatus.loopDays || 'N/A' }}</span>
+              </div>
+              <div class="data-item">
+                <strong>体力:</strong>
+                <progress-bar :value="state.userStatus.hp" :max="100" color="var(--progress-my-hp-bar)" />
+              </div>
+              <div class="data-item">
+                <strong>魔力:</strong>
+                <progress-bar :value="state.userStatus.mp" :max="100" color="var(--progress-my-mp-bar)" />
+              </div>
+              <div class="data-item">
+                <strong>灵魂:</strong>
+                <progress-bar
+                  :value="state.userStatus.soulPurity"
+                  :max="100"
+                  color="var(--progress-my-soul-bar)"
+                  text-color="#555"
+                />
+              </div>
+              <div class="data-item">
+                <strong>服装:</strong> <span class="value">{{ state.userStatus.clothing || 'N/A' }}</span>
+              </div>
+              <div class="data-item">
+                <strong>状态:</strong> <span class="value">{{ state.userStatus.condition || 'N/A' }}</span>
+              </div>
+              <div class="data-item">
+                <strong>动作:</strong> <span class="value">{{ state.userStatus.action || 'N/A' }}</span>
+              </div>
+            </div>
+
+            <!-- 用户背包面板 -->
+            <div v-if="activePopup === 'popup-user-inventory'">
+              <div class="data-item">
+                <strong>悲叹之种:</strong>
+                <button
+                  @click="useGriefSeed"
+                  :disabled="!state.userInventory.griefSeeds || state.userInventory.griefSeeds <= 0"
+                  class="item-button"
+                  style="width: auto; padding: 4px 10px"
+                >
+                  <span class="value-display" ref="griefSeedsValueRef"
+                    >{{ state.userInventory.griefSeeds || '0' }}</span
+                  >
+                  <span
+                    v-if="state.userInventory.griefSeeds > 0"
+                    style="margin-left: 8px; font-size: 0.9em; opacity: 0.8"
+                    >(点击使用)</span
+                  >
+                </button>
+              </div>
+              <div class="data-item inventory-items">
+                <strong>背包物品:</strong>
+                <div class="item-list">
+                  <template v-if="state.userInventory.items && state.userInventory.items.length">
+                    <button
+                      v-for="item in state.userInventory.items"
+                      :key="item"
+                      @click="useItem(item)"
+                      class="item-button"
+                    >
+                      {{ item }}
+                    </button>
+                  </template>
+                  <span v-else class="value">空</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- 战斗与能力面板 -->
+            <div v-if="activePopup === 'popup-combat'">
+              <div class="data-item combat-items">
+                <strong>魔法技能:</strong>
+                <div class="item-list">
+                  <template v-if="state.combat.skills && state.combat.skills.length">
+                    <button
+                      v-for="skill in state.combat.skills"
+                      :key="skill"
+                      @click="useSkill(skill)"
+                      class="item-button"
+                    >
+                      {{ skill }}
+                    </button>
+                  </template>
+                  <span v-else class="value">无</span>
+                </div>
+              </div>
+              <div class="data-item combat-items">
+                <strong>武器:</strong>
+                <div class="item-list">
+                  <template v-if="state.combat.weapon && state.combat.weapon.length">
+                    <!-- 武器只用于展示，不可点击 -->
+                    <span v-for="w in state.combat.weapon" :key="w" class="value" style="padding: 6px 0">{{ w }}</span>
+                  </template>
+                  <span v-else class="value">无</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- 同伴状态面板 -->
+            <div v-if="activePopup === 'popup-companions'">
+              <TransitionGroup name="list" tag="div" v-if="state.companions.length">
+                <companion-card v-for="comp in state.companions" :key="comp.id" :companion="comp" />
+              </TransitionGroup>
+              <div v-else class="no-data-message">暂无同伴信息</div>
+            </div>
+
+            <!-- 敌人面板 -->
+            <div v-if="activePopup === 'popup-enemies'">
+              <TransitionGroup name="list" tag="div" v-if="state.enemies.length">
+                <enemy-card v-for="(enemy, index) in state.enemies" :key="enemy.name + index" :enemy="enemy" />
+              </TransitionGroup>
+              <div v-else class="no-data-message">暂无敌人信息</div>
+            </div>
+
+            <!-- 魔法少女小贴士面板 -->
+            <div v-if="activePopup === 'popup-tips'">
+              <TransitionGroup name="list" tag="div" v-if="state.tips.length">
+                <tip-item v-for="(tip, index) in state.tips" :key="index" :tip="tip" @send="sendAsChatMessage" />
+              </TransitionGroup>
+              <div v-else class="no-data-message">暂无小贴士</div>
+            </div>
+
+            <!-- 调试面板 -->
+            <div v-if="activePopup === 'popup-debug'" class="debug-panel">
+              <h4>原始输入 (rawGameTxt)</h4>
+              <pre>{{ rawGameTxt }}</pre>
+              <h4>解析后状态 (JSON)</h4>
+              <pre>{{ JSON.stringify(state, null, 2) }}</pre>
+            </div>
+
+            <!-- 设置面板 -->
+            <div vif="activePopup === 'popup-settings'" class="settings-panel">
+              <div v-for="button in settableNavButtons" :key="button.id" class="setting-item">
+                <span>{{ button.label }}</span>
+                <button
+                  @click="uiSettings[button.id].visible = !uiSettings[button.id].visible"
+                  class="toggle-button"
+                  :class="uiSettings[button.id].visible ? 'on' : 'off'"
+                >
+                  {{ uiSettings[button.id].visible ? '开启' : '关闭' }}
+                </button>
+              </div>
+            </div>
+          </template>
+        </popup-panel>
+      </Transition>
+
+      <!-- 底部按钮 -->
+      <div class="bottom-bar">
+        <div class="bottom-popup-button" @click="togglePopup('popup-tips')">魔法少女小贴士</div>
+      </div>
+    </div>
+
+    <script>
+      '安全注释：由于SillyTavern的脚本执行环境限制，使用标准的JS注释(/* */ 或 //)可能会导致脚本加载失败。';
+      '因此，本项目中的所有JS注释都以这种独立的字符串字面量形式存在。';
+
+      const { createApp, ref, reactive, computed, onMounted, watch } = Vue;
+
+      ('==================================================================================');
+      ('== 1. 数据解析模块 (Parser) - MVU模式中的核心 "Update" 逻辑的第一部分         ==');
+      ('==================================================================================');
+      ('此函数是整个UI的“数据心脏”，负责将SillyTavern传来的、非结构化的原始文本，解析成一个结构化的JavaScript对象（即我们的 Model）。');
+      ('它采用了状态机（State Machine）的设计思想来逐行解析文本，使其能够健壮地处理各种复杂的、动态生成的内容。');
+      ('复刻原理: 要实现类似功能，你需要：1. 定义好你期望的输入文本格式（如各种标题和字段）。2. 创建一个空的JS对象作为数据模板。3. 逐行读取文本，使用if/else或switch判断当前行属于哪个部分。4. 根据预设的规则（如正则表达式分割、多行拼接）提取数据并填充到JS对象中。');
+      function parseGameTxt(rawText) {
+        '首先，使用正则表达式分别提取 <content> 和 <status> 标签内的内容。';
+        const contentMatch = rawText.match(/<content>([\s\S]*?)<\/content>/);
+        const statusMatch = rawText.match(/<status>([\s\S]*?)<\/status>/);
+
+        ('定义一个初始的、空的state对象结构。这是MVU模式中的Model（模型）的蓝本。');
+        ('即使解析失败，也会返回这个基本结构，防止UI崩溃。');
+        const initialState = {
+          mainContent: '内容加载失败。',
+          system: {},
+          userStatus: {},
+          userInventory: {},
+          combat: { skills: [], weapon: [] },
+          companions: [],
+          enemies: [],
+          tips: [],
+          userInventory: { griefSeeds: 'N/A', items: [] },
+        };
+
+        if (contentMatch) initialState.mainContent = contentMatch[1].trim();
+        if (!statusMatch) return initialState;
+        ('如果status部分不存在，直接返回，保证健壮性。');
+
+        const statusText = statusMatch[1].trim();
+        const lines = statusText.split(/\r?\n/);
+        ('将status文本按行分割成数组。');
+
+        ('定义状态机变量，用于在解析过程中跟踪当前所处的区段和对象。');
+        let currentSection = null; // 当前区段 (e.g., 'userStatus', 'companions')
+        let currentCompanion = null; // 当前正在处理的同伴对象
+        let currentEnemy = null; // 当前正在处理的敌人对象
+        let lastKey = null; // 上一个解析到的键，用于处理多行值
+        let lastObject = null; // 上一个正在操作的对象
+        let isCapturingItems = false; // 一个特殊标志位，用于解决“背包物品”多行文本的解析问题。
+
+        ('sectionTitles: 将AI输出的中文标题映射到我们内部使用的英文区段名。');
+        const sectionTitles = {
+          系统: 'system',
+          用户的状态: 'userStatus',
+          用户背包: 'userInventory',
+          战斗版块: 'combat',
+          同伴状态: 'companions',
+          敌人: 'enemies',
+          魔法少女小贴士: 'tips',
+        };
+        ('keyMap: 将AI输出的中文键名映射到JS对象中的属性名。这种设计使得前端可以灵活地重命名字段，而无需修改AI的输出格式。');
+        const keyMap = {
+          时间: 'time',
+          地点: 'location',
+          现在时间段原剧情: 'plot',
+          轮回次数: 'loopCount',
+          轮回天数: 'loopDays',
+          体力值: 'hp',
+          魔法值: 'mp',
+          灵魂纯净度: 'soulPurity',
+          服装: 'clothing',
+          当前身体状态: 'condition',
+          当前动作: 'action',
+          悲叹之种: 'griefSeeds',
+          背包物品: 'items',
+          魔法技能: 'skills',
+          武器: 'weapon',
+          姓名: 'name',
+          好感度: 'affection',
+          内心想法: 'thoughts',
+          名字: 'name',
+          生命值: 'hp',
+          特殊机制: 'mechanics',
+        };
+
+        ('开始逐行解析');
+        for (const line of lines) {
+          const trimmedLine = line.trim();
+          if (!trimmedLine) continue;
+          ('忽略空行');
+
+          ('检查当前行是否为一个新的区段标题');
+          if (sectionTitles[trimmedLine]) {
+            currentSection = sectionTitles[trimmedLine];
+            ('重置所有状态机变量，进入新区段');
+            currentCompanion = null;
+            currentEnemy = null;
+            lastKey = null;
+            lastObject = null;
+            isCapturingItems = false;
+            continue;
+          }
+
+          if (!currentSection) continue;
+          ('如果还没进入任何区段，忽略此行');
+
+          ('针对“魔法少女小贴士”区段的特殊处理逻辑');
+          if (currentSection === 'tips') {
+            const parts = trimmedLine.split(/[:：](.*)/s); // 使用兼容全角/半角冒号的正则分割
+            const tip = { comment: '魔法顾问', option: trimmedLine, clickable: true };
+            if (parts.length > 1 && parts[1] && parts[1].trim()) {
+              tip.comment = parts[0].trim();
+              tip.option = parts[1].trim();
+            }
+            if (tip.option.includes('暂无建议')) tip.clickable = false; // 如果是“暂无建议”，则设为不可点击
+            initialState.tips.push(tip);
+            continue;
+          }
+
+          ('历史经验：修复了无法解析多个同伴的bug。');
+          ('这里的逻辑是，在同伴区域，一旦遇到以"npc"开头的行，就创建一个新的同伴对象。');
+          if (currentSection === 'companions' && trimmedLine.toLowerCase().startsWith('npc')) {
+            currentCompanion = { id: trimmedLine.split(/[:：]/)[1]?.trim() || Date.now() }; // 使用id或时间戳作为唯一key
+            initialState.companions.push(currentCompanion);
+            lastObject = currentCompanion;
+            lastKey = null;
+            isCapturingItems = false;
+            continue;
+          }
+
+          ('通用键值对解析逻辑');
+          ('历史经验：这里的正则表达式 (.*)/s 是为了正确处理值中可能包含冒号的情况。');
+          const parts = trimmedLine.split(/[:：](.*)/s);
+          const key = parts[0].trim();
+          const value = parts.length > 1 ? parts[1].trim() : '';
+
+          ('为“背包物品”开启特殊的多行捕捉模式');
+          if (currentSection === 'userInventory' && key === '背包物品') {
+            isCapturingItems = true;
+            initialState.userInventory.items = value ? [value] : [];
+            lastObject = initialState.userInventory;
+            lastKey = 'items';
+            continue;
+          }
+
+          ('历史经验：处理多行值的核心逻辑。如果一行没有冒号，并且我们知道上一个键是什么，就认为这行是上一个值的延续。');
+          if (parts.length === 1 && lastKey && lastObject && lastKey in lastObject) {
+            if (isCapturingItems) {
+              initialState.userInventory.items.push(trimmedLine);
+            } else if (lastKey === 'skills' || lastKey === 'weapon') {
+              // 如果是技能或武器，则添加到数组中
+              if (lastObject[lastKey].length === 1 && lastObject[lastKey][0] === '') {
+                lastObject[lastKey][0] = trimmedLine;
+              } else {
+                lastObject[lastKey].push(trimmedLine);
+              }
+            } else {
+              // 其他情况，直接用换行符拼接字符串
+              lastObject[lastKey] += (lastObject[lastKey] ? '\n' : '') + trimmedLine;
+            }
+            continue;
+          }
+
+          const mappedKey = keyMap[key];
+          if (!mappedKey) continue;
+          ('如果键名不在我们的映射表中，则忽略');
+
+          ('根据当前区段，确定要操作的目标对象');
+          switch (currentSection) {
+            case 'system':
+              lastObject = initialState.system;
+              break;
+            case 'userStatus':
+              lastObject = initialState.userStatus;
+              break;
+            case 'combat':
+              lastObject = initialState.combat;
+              break;
+            case 'userInventory':
+              lastObject = initialState.userInventory;
+              break;
+            case 'companions':
+              lastObject = currentCompanion;
+              break;
+            case 'enemies':
+              if (key === '名字') {
+                // 遇到“名字”时，创建一个新的敌人对象
+                currentEnemy = {};
+                initialState.enemies.push(currentEnemy);
+              }
+              lastObject = currentEnemy;
+              break;
+          }
+          if (lastObject) {
+            ('将解析出的值赋给目标对象');
+            if (mappedKey === 'skills' || mappedKey === 'weapon') {
+              lastObject[mappedKey] = value ? [value] : []; // 技能和武器是数组
+            } else {
+              lastObject[mappedKey] = value;
+            }
+            lastKey = mappedKey; // 记录最后操作的键，以备处理多行值
+          }
+        }
+        return initialState;
+      }
+
+      ('==================================================================================');
+      ('== 2. Vue 应用定义 - 驱动UI的核心                                               ==');
+      ('==================================================================================');
+      const app = createApp({
+        setup() {
+          '--- 响应式状态 (Model) ---';
+          '此 `state` 对象是本应用 MVU (Model-View-Update) 模式中的 **Model** (模型)。';
+          '它通过 Vue 的 `reactive` API 创建，包含了驱动整个UI所需的所有数据。当它的任何属性被修改时，相关的 **View** (视图) 都会自动更新。';
+
+          '核心机制：`rawGameTxt` 的初始值是 `$1`。在SillyTavern的正则替换功能中，`$1` 会被替换为第一个捕获组的内容（即<game_txt>标签内的所有文本）。';
+          '这是实现数据从SillyTavern注入到Vue应用的入口点和关键。';
+          const rawGameTxt = ref(`$1`);
+          const state = reactive({
+            mainContent: '故事内容加载中...',
+            system: {},
+            userStatus: {},
+            userInventory: { griefSeeds: 'N/A', items: [] },
+            combat: { skills: [], weapon: [] },
+            companions: [],
+            enemies: [],
+            tips: [],
+          });
+          const activePopup = ref(null); // 当前激活的弹窗ID
+          ('为需要动画效果的DOM元素创建引用');
+          const loopCountValueRef = ref(null);
+          const loopDaysValueRef = ref(null);
+          const griefSeedsValueRef = ref(null);
+          const uiSettings = reactive({}); // 存储UI元素的可见性等设置
+
+          ('--- 导航和UI配置 ---');
+          const navButtons = [
+            { id: 'status', icon: '◇', label: '你的状态', popupId: 'popup-user-status' },
+            { id: 'inventory', icon: '◎', label: '你的背包', popupId: 'popup-user-inventory' },
+            { id: 'combat', icon: '⚔', label: '战斗与能力', popupId: 'popup-combat' },
+            { id: 'companions', icon: '♡', label: '同伴状态', popupId: 'popup-companions' },
+            { id: 'enemies', icon: '☠', label: '敌人', popupId: 'popup-enemies' },
+            { id: 'debug', icon: '🐞', label: '调试', popupId: 'popup-debug' },
+            { id: 'settings', icon: '⚙', label: '设置', popupId: 'popup-settings' },
+          ];
+
+          const settableNavButtons = computed(() => navButtons.filter(b => b.id !== 'settings'));
+
+          ('--- 计算属性 (Computed Properties) ---');
+          ('计算属性用于根据state派生出新的数据，当依赖的state变化时，它会自动重新计算。');
+          const formatSystemInfo = computed(() => {
+            return [
+              state.system.time ? `时间: ${state.system.time}` : '',
+              state.system.location ? `地点: ${state.system.location}` : '',
+              state.system.plot ? `现在时间段原剧情: ${state.system.plot}` : '',
+            ]
+              .filter(Boolean)
+              .join(' | ');
+          });
+
+          ('--- 方法 (Methods) - MVU模式中的 "Update" 逻辑的第二部分 ---');
+          ('这些方法响应用户交互（如点击）并可能修改 "Model" (state)。');
+          const togglePopup = popupId => {
+            activePopup.value = activePopup.value === popupId ? null : popupId;
+          };
+
+          const closePopup = () => {
+            activePopup.value = null;
+          };
+
+          const useGriefSeed = () => {
+            if (state.userInventory.griefSeeds > 0) {
+              sendAsChatMessage('使用 悲叹之种');
+            }
+          };
+
+          const getPopupTitle = popupId => navButtons.find(b => b.popupId === popupId)?.label || '';
+          const getPopupPosition = popupId => (popupId === 'popup-tips' ? 'bottom-up' : 'top-down');
+
+          ('核心机制：与SillyTavern通信的函数。');
+          ('此函数是与SillyTavern主界面通信的桥梁。它使用了官方在 `@types/iframe/exported.sillytavern.d.ts` 中定义的 `createChatMessages` 和 `triggerSlash` 全局函数。');
+          ('复刻原理: 1. 检查 `typeof createChatMessages === "function"` 来判断是否在SillyTavern环境中。 2. 调用 `createChatMessages` 并传入一个消息对象数组（例如 `[{ role: "user", message: "..." }]`）来模拟用户发送消息。 3. (可选) 调用 `triggerSlash("/trigger")` 来提示AI进行回复。');
+          const sendAsChatMessage = message => {
+            if (typeof createChatMessages === 'function' && typeof triggerSlash === 'function') {
+              (async () => {
+                await createChatMessages([{ role: 'user', message: message }]);
+                triggerSlash('/trigger');
+              })();
+            } else {
+              console.warn('SillyTavern API not found.');
+              alert(`在SillyTavern环境外无法发送消息。消息内容：\n${message}`);
+            }
+          };
+
+          const useItem = itemString => {
+            const itemName = itemString.split(/x\d*$/)[0].trim(); // 从 "物品xN" 的格式中提取物品名
+            if (itemName) {
+              sendAsChatMessage(`使用 ${itemName}`);
+            }
+          };
+
+          const useSkill = skillName => {
+            sendAsChatMessage(`使用 ${skillName}`);
+          };
+
+          ('为DOM元素应用闪烁动画，以可视化数值变化');
+          const applyChangeAnimation = (element, newValue, oldValue) => {
+            if (!element || newValue === oldValue) return;
+            const newNum = parseFloat(newValue);
+            const oldNum = parseFloat(oldValue);
+            if (isNaN(newNum) || isNaN(oldNum)) return;
+
+            const changeClass = newNum > oldNum ? 'value-changed-up' : 'value-changed-down';
+            element.classList.add(changeClass);
+            setTimeout(() => {
+              element.classList.remove(changeClass);
+            }, 700);
+          };
+
+          ('--- 生命周期钩子 (Lifecycle Hooks) ---');
+          ('此函数是 Vue 的生命周期钩子，在组件被挂载到 DOM 后执行。它等同于 jQuery 的 `$(document).ready()`。');
+          ('根据官方 `脚本示例` 的实践，这里是执行所有初始化逻辑（如加载设置、首次解析数据）的最佳位置。');
+          onMounted(() => {
+            '加载UI设置：从localStorage读取用户保存的UI可见性设置，实现持久化。这是标准的Web开发实践。';
+            const savedSettings = localStorage.getItem('tavernHelperUISettings');
+            const defaultSettings = navButtons.reduce((acc, btn) => {
+              acc[btn.id] = { visible: true };
+              return acc;
+            }, {});
+
+            if (savedSettings) {
+              Object.assign(uiSettings, { ...defaultSettings, ...JSON.parse(savedSettings) });
+            } else {
+              Object.assign(uiSettings, defaultSettings);
+            }
+
+            ('监视设置变化并自动保存到 localStorage。');
+            watch(
+              uiSettings,
+              newSettings => {
+                localStorage.setItem('tavernHelperUISettings', JSON.stringify(newSettings));
+              },
+              { deep: true },
+            );
+
+            ('核心逻辑：在组件挂载时，执行首次的 **Update** 操作，将注入的原始文本 `rawGameTxt` 解析后，填充到 **Model** (`state`) 中，从而完成UI的首次渲染。');
+            const parsedData = parseGameTxt(rawGameTxt.value);
+            Object.assign(state, parsedData);
+
+            ('监视特定数值的变化，以触发对应的动画效果。');
+            watch(
+              () => state.userStatus.loopCount,
+              (newVal, oldVal) => applyChangeAnimation(loopCountValueRef.value, newVal, oldVal),
+            );
+            watch(
+              () => state.userStatus.loopDays,
+              (newVal, oldVal) => applyChangeAnimation(loopDaysValueRef.value, newVal, oldVal),
+            );
+            watch(
+              () => state.userInventory.griefSeeds,
+              (newVal, oldVal) => applyChangeAnimation(griefSeedsValueRef.value, newVal, oldVal),
+            );
+          });
+
+          ('返回所有需要在模板（View）中用到的数据（Model）和方法（Update）。');
+          return {
+            state,
+            rawGameTxt,
+            activePopup,
+            loopCountValueRef,
+            loopDaysValueRef,
+            griefSeedsValueRef,
+            uiSettings,
+            navButtons,
+            settableNavButtons,
+            formatSystemInfo,
+            togglePopup,
+            closePopup,
+            getPopupTitle,
+            getPopupPosition,
+            sendAsChatMessage,
+            useItem,
+            useSkill,
+            useGriefSeed,
+          };
+        },
+      });
+
+      ('==================================================================================');
+      ('== 3. Vue 组件定义 (View Components) - MVU模式中的 "View" 的可复用部分         ==');
+      ('==================================================================================');
+      ('此部分定义了多个可复用的UI组件，构成了 MVU 模式中的 **View** (视图)。');
+      ('这种组件化的方法是 Vue 的核心思想，也与官方 `界面示例` 中将UI拆分为 `日记.vue`、`选择框.vue` 等多个文件的实践相符，极大地提高了代码的可读性和可维护性。');
+
+      ('通用弹出面板组件');
+      app.component('popup-panel', {
+        props: ['isActive', 'position', 'popupId'],
+        emits: ['close'],
+        template: `
+        <div class="popup-panel" :class="[position, popupId]">
+            <div class="popup-header">
+                <h3 class="popup-title"><slot name="title"></slot></h3>
+                <span class="popup-close-btn" @click="$emit('close')">&times;</span>
+            </div>
+            <div class="popup-content"><slot name="content"></slot></div>
+        </div>
+    `,
+      });
+
+      ('带动画的进度条组件');
+      app.component('progress-bar', {
+        props: {
+          value: [String, Number],
+          max: { type: Number, default: 100 },
+          color: String,
+          textColor: { type: String, default: '#fff' },
+        },
+        setup(props) {
+          const animatedValue = ref(0);
+          const displayValue = computed(() => Math.round(animatedValue.value));
+          const percentage = computed(() => (animatedValue.value / props.max) * 100);
+
+          ('当外部传入的 `value` 变化时，使用 GSAP 动画库将 `animatedValue` 平滑地过渡到新值。');
+          watch(
+            () => props.value,
+            newValue => {
+              gsap.to(animatedValue, { duration: 0.8, value: parseFloat(newValue) || 0, ease: 'power2.out' });
+            },
+            { immediate: true },
+          );
+
+          return { displayValue, percentage };
+        },
+        template: `
+        <div class="progress-bar-container">
+            <div class="progress-bar-fill" :style="{ width: percentage + '%', background: color }"></div>
+            <span class="progress-bar-text" :style="{ color: textColor }">{{ displayValue }} / {{ max }}</span>
+        </div>
+    `,
+      });
+
+      ('同伴信息卡片组件');
+      app.component('companion-card', {
+        props: ['companion'],
+        template: `
+        <div class="card-block companion-card">
+            <h4>{{ companion.name || '未知同伴' }}</h4>
+            <div class="data-item"><strong>体力:</strong> <progress-bar :value="companion.hp" color="var(--progress-my-hp-bar)" /></div>
+            <div class="data-item"><strong>魔力:</strong> <progress-bar :value="companion.mp" color="var(--progress-my-mp-bar)" /></div>
+            <div class="data-item"><strong>好感:</strong> <progress-bar :value="companion.affection" :max="200" :min="-100" color="var(--progress-comp-aff-bar)" text-color="#6f4e00" /></div>
+            <div class="data-item"><strong>灵魂:</strong> <progress-bar :value="companion.soulPurity" color="var(--progress-my-soul-bar)" text-color="#555" /></div>
+            <div class="data-item"><strong>悲叹之种:</strong> <span class="value">{{ companion.griefSeeds || 'N/A' }}</span></div>
+            <div class="data-item"><strong>心声:</strong> <span class="value">{{ companion.thoughts || 'N/A' }}</span></div>
+            <div class="data-item"><strong>服装:</strong> <span class="value">{{ companion.clothing || 'N/A' }}</span></div>
+            <div class="data-item"><strong>动作:</strong> <span class="value">{{ companion.action || 'N/A' }}</span></div>
+        </div>
+    `,
+      });
+
+      ('敌人信息卡片组件');
+      app.component('enemy-card', {
+        props: ['enemy'],
+        template: `
+        <div class="card-block enemy-card">
+            <h4>{{ enemy.name || '未知敌人' }}</h4>
+            <div class="data-item"><strong>生命:</strong> <progress-bar :value="enemy.hp" color="var(--progress-enemy-hp-bar)" /></div>
+            <div class="data-item"><strong>机制:</strong> <span class="value">{{ enemy.mechanics || 'N/A' }}</span></div>
+        </div>
+    `,
+      });
+
+      ('魔法少女小贴士条目组件');
+      app.component('tip-item', {
+        props: ['tip'],
+        emits: ['send'],
+        template: `
+        <div class="tip-item" :class="{ clickable: tip.clickable }" @click="tip.clickable && $emit('send', tip.option)">
+            <div class="tip-header">✧ {{ tip.comment }}</div>
+            <div class="tip-content">{{ tip.option }}</div>
+        </div>
+    `,
+      });
+
+      ('==================================================================================');
+      ('== 4. 挂载应用 - 让Vue接管页面                                                    ==');
+      ('==================================================================================');
+      ('最后，调用 `app.mount` 将我们创建的Vue应用实例挂载到HTML中ID为`app`的DOM元素上，从而让整个应用生效。');
+      app.mount('#app');
+    </script>
+  </body>
+</html>

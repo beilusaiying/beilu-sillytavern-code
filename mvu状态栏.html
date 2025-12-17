@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Galgame Style Collapsible Status Bar</title>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/gsap.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Ma+Shan+Zheng&family=Noto+Serif+SC:wght@400;700&family=Quicksand:wght@500;700&display=swap" rel="stylesheet">
+
+    <style>
+        :root {
+            --primary-color: #ff9a9e; /* 樱花粉 */
+            --primary-dark: #ff6b81;
+            --secondary-color: #a18cd1; /* 紫罗兰 */
+            --accent-gold: #ffd700;
+            --text-main: #2c3e50;
+            --text-light: #ecf0f1;
+            --bg-main: #fdf6fa; /* 乳白色背景 */
+            --shadow-soft: 0 8px 32px 0 rgba(31, 38, 135, 0.1);
+            --font-title: 'Ma Shan Zheng', cursive;
+            --font-body: 'Noto Serif SC', serif;
+            --font-num: 'Quicksand', sans-serif;
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0; padding: 0;
+            font-family: var(--font-body);
+            background: transparent;
+            color: var(--text-main);
+        }
+
+        #bg-canvas {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            z-index: -1; pointer-events: none;
+        }
+
+        /* --- 可折叠容器 (核心布局) --- */
+        .collapsible-container {
+            width: 95%;
+            max-width: 900px;
+            margin: 10px auto;
+            border-radius: 20px;
+            box-shadow: var(--shadow-soft);
+            backdrop-filter: blur(12px);
+            background: rgba(253, 246, 250, 0.75); /* 使用带透明度的乳白色 */
+            border: 1px solid rgba(255, 255, 255, 0.5);
+            overflow: hidden;
+            transition: all 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .main-header {
+            padding: 15px 25px;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-family: var(--font-title);
+            font-size: 1.5em;
+            color: var(--primary-dark);
+            user-select: none;
+            transition: background 0.3s;
+        }
+        .main-header:hover {
+            background: rgba(255, 237, 240, 0.5);
+        }
+
+        .header-arrow {
+            font-size: 0.8em;
+            transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        .collapsible-container.expanded .header-arrow {
+            transform: rotate(180deg);
+        }
+
+        .main-content-wrapper {
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.7s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        .collapsible-container.expanded .main-content-wrapper {
+            max-height: 3000px; /* 足够大的值以容纳内容 */
+        }
+
+        /* --- Vue App 容器 --- */
+        #app {
+            padding: 0 20px 20px 20px;
+        }
+
+        /* --- 内部导航栏 --- */
+        .nav-bar {
+            display: flex; justify-content: center; gap: 15px;
+            margin-bottom: 25px;
+            padding-top: 15px;
+            border-bottom: 1px solid rgba(0,0,0,0.08);
+        }
+
+        .nav-item {
+            padding: 8px 20px;
+            border-radius: 30px;
+            cursor: pointer;
+            font-family: var(--font-title);
+            font-size: 1.2em;
+            color: var(--text-main);
+            transition: all 0.3s ease;
+            position: relative;
+            overflow: hidden;
+            display: flex; align-items: center; gap: 8px;
+        }
+        .nav-item::before {
+            content: ''; position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: linear-gradient(45deg, var(--primary-color), var(--secondary-color));
+            opacity: 0; transition: opacity 0.3s ease; z-index: -1;
+        }
+        .nav-item:hover { transform: translateY(-2px); color: var(--primary-dark); }
+        .nav-item.active { color: white; box-shadow: 0 4px 15px rgba(255, 107, 129, 0.4); }
+        .nav-item.active::before { opacity: 1; }
+
+        /* --- 角色卡片 --- */
+        .character-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 25px;
+        }
+
+        .char-card {
+            background: rgba(255, 255, 255, 0.7);
+            border-radius: 16px;
+            overflow: hidden;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.05);
+            transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            border: 1px solid rgba(255,255,255,0.6);
+        }
+
+        /* 新的呼吸灯悬停效果 */
+        @keyframes breathing-light {
+            0% { box-shadow: 0 0 5px rgba(255, 154, 158, 0.2); }
+            50% { box-shadow: 0 0 20px rgba(255, 154, 158, 0.6); }
+            100% { box-shadow: 0 0 5px rgba(255, 154, 158, 0.2); }
+        }
+
+        .char-card:hover {
+            transform: translateY(-8px);
+            animation: breathing-light 2s infinite ease-in-out;
+        }
+
+        .char-card.active {
+            border-color: var(--primary-color);
+            box-shadow: 0 0 20px rgba(255, 154, 158, 0.5);
+        }
+
+        .card-header {
+            height: 100px;
+            background: linear-gradient(120deg, #a18cd1 0%, #fbc2eb 100%);
+            position: relative;
+            display: flex; align-items: center; justify-content: center;
+        }
+        .card-avatar {
+            width: 70px; height: 70px;
+            background: white; border-radius: 50%;
+            border: 4px solid rgba(255,255,255,0.8);
+            display: flex; align-items: center; justify-content: center;
+            font-family: var(--font-title); font-size: 2.2em;
+            color: var(--secondary-color);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+        }
+        .card-name {
+            position: absolute; bottom: 8px; left: 15px;
+            font-family: var(--font-title); font-size: 1.6em;
+            color: white; text-shadow: 0 2px 4px rgba(0,0,0,0.3);
+        }
+
+        .card-body { padding: 20px; }
+
+        /* --- 进度条 --- */
+        .stat-row { margin-bottom: 15px; }
+        .stat-header { display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 5px; }
+        .stat-label { font-size: 0.9em; color: #666; font-weight: bold; display: flex; align-items: center; gap: 6px; }
+        .stat-val { font-family: var(--font-num); font-weight: 700; color: var(--primary-dark); }
+        .progress-track { height: 12px; background: rgba(0,0,0,0.05); border-radius: 6px; overflow: hidden; box-shadow: inset 0 1px 3px rgba(0,0,0,0.1); }
+        .progress-fill {
+            height: 100%; border-radius: 6px;
+            width: 0; /* 初始为0，由JS动画控制 */
+            background-size: 200% 200%;
+        }
+
+        .fill-love { background-image: linear-gradient(90deg, #ff9a9e, #fecfef); }
+        .fill-lust { background-image: linear-gradient(90deg, #ff758c, #ff7eb3); }
+        .fill-dark { background-image: linear-gradient(90deg, #c3aed6, #a18cd1); }
+
+        /* --- 事件徽章 --- */
+        .badge-grid { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 20px; padding-top: 15px; border-top: 1px dashed rgba(0,0,0,0.1); }
+        .badge {
+            width: 38px; height: 38px; border-radius: 50%;
+            background: #eee; display: flex; align-items: center; justify-content: center;
+            color: #bbb; font-size: 1.1em; position: relative;
+            transition: all 0.3s; cursor: help;
+        }
+        .badge.unlocked {
+            background: linear-gradient(135deg, #fff 0%, #f0f0f0 100%);
+            color: var(--accent-gold);
+            box-shadow: 0 2px 8px rgba(255, 215, 0, 0.3);
+            border: 1px solid var(--accent-gold);
+            animation: popIn 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        }
+        .badge-tooltip {
+            position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%);
+            background: rgba(0,0,0,0.8); color: white;
+            padding: 5px 10px; border-radius: 5px; font-size: 0.8em;
+            white-space: nowrap; opacity: 0; pointer-events: none;
+            transition: opacity 0.2s; margin-bottom: 8px; z-index: 10;
+        }
+        .badge:hover .badge-tooltip { opacity: 1; }
+        @keyframes popIn { 0% { transform: scale(0); } 100% { transform: scale(1); } }
+
+        /* --- 用户关系面板 --- */
+        .user-panel { padding: 10px; }
+        .relation-section { margin-bottom: 25px; }
+        .relation-title {
+            font-family: var(--font-title); font-size: 1.4em; color: var(--secondary-color);
+            border-bottom: 2px solid var(--primary-color);
+            padding-bottom: 8px; margin-bottom: 15px;
+            display: flex; align-items: center; gap: 10px;
+        }
+        .name-tag-container { display: flex; flex-wrap: wrap; gap: 10px; }
+        .name-tag {
+            padding: 8px 16px; background: white; border-radius: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+            font-weight: bold; color: var(--text-main);
+            border: 1px solid transparent; transition: all 0.3s;
+            display: flex; align-items: center; gap: 5px;
+        }
+        .name-tag:hover { transform: scale(1.05); border-color: var(--primary-color); color: var(--primary-dark); }
+        .tag-icon { color: var(--primary-color); }
+        .no-data { text-align: center; padding: 20px; color: #999; font-style: italic; width: 100%; }
+
+        /* Vue 过渡动画 */
+        .list-enter-active, .list-leave-active { transition: all 0.5s ease; }
+        .list-enter-from, .list-leave-to { opacity: 0; transform: translateY(20px); }
+    </style>
+</head>
+<body>
+
+<div id="bg-canvas"></div>
+
+<div id="app-container" class="collapsible-container">
+    <!-- 主标题和折叠控制器 -->
+    <div class="main-header">
+        <span>✨ 状态栏</span>
+        <span class="header-arrow">▼</span>
+    </div>
+
+    <!-- 内容包裹器 -->
+    <div class="main-content-wrapper">
+        <div id="app">
+            <!-- 内部导航 -->
+            <nav class="nav-bar">
+                <div class="nav-item" :class="{ active: currentTab === 'characters' }" @click="switchTab('characters')">
+                    <i class="fas fa-users"></i> 羁绊
+                </div>
+                <div class="nav-item" :class="{ active: currentTab === 'user' }" @click="switchTab('user')">
+                    <i class="fas fa-heart"></i> 誓约
+                </div>
+            </nav>
+
+            <!-- 内容区 -->
+            <div class="content-wrapper">
+                <!-- 角色列表页 -->
+                <transition-group name="list" tag="div" class="character-grid" v-if="currentTab === 'characters'">
+                    <div v-for="(char, name) in characters" :key="name" class="char-card" :class="{ active: currentCharacter === name }">
+                        <div class="card-header">
+                            <div class="card-avatar">{{ name[0] }}</div>
+                            <div class="card-name">{{ name }}</div>
+                        </div>
+                        <div class="card-body">
+                            <!-- 好感度 -->
+                            <div class="stat-row">
+                                <div class="stat-header">
+                                    <span class="stat-label"><i class="fas fa-heart" style="color: #ff6b81;"></i> 好感度</span>
+                                    <span class="stat-val">{{ char.好感度 }} / 200</span>
+                                </div>
+                                <div class="progress-track">
+                                    <div class="progress-fill fill-love" :data-width="Math.max(0, (char.好感度 / 200) * 100)"></div>
+                                </div>
+                            </div>
+                            <!-- 快感值 -->
+                            <div class="stat-row">
+                                <div class="stat-header">
+                                    <span class="stat-label"><i class="fas fa-fire" style="color: #ff758c;"></i> 快感值</span>
+                                    <span class="stat-val">{{ char.快感值 }} / 150</span>
+                                </div>
+                                <div class="progress-track">
+                                    <div class="progress-fill fill-lust" :data-width="Math.max(0, (char.快感值 / 150) * 100)"></div>
+                                </div>
+                            </div>
+                            <!-- 堕落值 -->
+                            <div class="stat-row">
+                                <div class="stat-header">
+                                    <span class="stat-label"><i class="fas fa-heart-crack" :style="{color: 'var(--secondary-color)'}"></i> 堕落值</span>
+                                    <span class="stat-val">{{ char.堕落值 }} / 100</span>
+                                </div>
+                                <div class="progress-track">
+                                    <div class="progress-fill fill-dark" :data-width="Math.max(0, (char.堕落值 / 100) * 100)"></div>
+                                </div>
+                            </div>
+                            <!-- 事件徽章 -->
+                            <div class="badge-grid">
+                                <div class="badge" :class="{ unlocked: char.初吻事件 }"><i class="fas fa-kiss-wink-heart"></i><div class="badge-tooltip">初吻事件</div></div>
+                                <div class="badge" :class="{ unlocked: char.喜欢事件 }"><i class="fas fa-grin-hearts"></i><div class="badge-tooltip">喜欢事件</div></div>
+                                <div class="badge" :class="{ unlocked: char.告白事件 }"><i class="fas fa-envelope-open-text"></i><div class="badge-tooltip">告白事件</div></div>
+                                <div class="badge" :class="{ unlocked: char.是否誓约 }"><i class="fas fa-ring"></i><div class="badge-tooltip">已誓约</div></div>
+                                <div class="badge" :class="{ unlocked: char.原谅事件 }"><i class="fas fa-hand-holding-heart"></i><div class="badge-tooltip">原谅事件</div></div>
+                            </div>
+                        </div>
+                    </div>
+                </transition-group>
+
+                <!-- 用户关系页 -->
+                <div class="user-panel" v-if="currentTab === 'user'">
+                    <div class="relation-section">
+                        <div class="relation-title"><i class="fas fa-ring" style="color: gold;"></i> 永恒誓约</div>
+                        <div class="name-tag-container">
+                            <div v-for="name in user.已经誓约角色" :key="name" class="name-tag"><i class="fas fa-gem tag-icon"></i> {{ name }}</div>
+                            <div v-if="!user.已经誓约角色?.length" class="no-data">暂无誓约对象</div>
+                        </div>
+                    </div>
+                    <div class="relation-section">
+                        <div class="relation-title"><i class="fas fa-heart" style="color: #ff6b81;"></i> 恋慕之人</div>
+                        <div class="name-tag-container">
+                            <div v-for="name in user.恋慕级阶段角色" :key="name" class="name-tag"><i class="fas fa-heart tag-icon"></i> {{ name }}</div>
+                            <div v-if="!user.恋慕级阶段角色?.length" class="no-data">暂无恋慕对象</div>
+                        </div>
+                    </div>
+                    <div class="relation-section">
+                        <div class="relation-title"><i class="fas fa-star" style="color: #a18cd1;"></i> 爱慕萌芽</div>
+                        <div class="name-tag-container">
+                            <div v-for="name in user.爱慕级阶段角色" :key="name" class="name-tag"><i class="fas fa-star tag-icon"></i> {{ name }}</div>
+                            <div v-if="!user.爱慕级阶段角色?.length" class="no-data">暂无爱慕对象</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    const { createApp, ref, onMounted, watch } = Vue;
+
+    // --- 樱花背景特效 ---
+    function initSakura() {
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        const container = document.getElementById('bg-canvas');
+        if (!container) return;
+
+        // 设置一个固定的父容器，避免canvas影响body
+        const bgWrapper = document.createElement('div');
+        bgWrapper.style.position = 'fixed';
+        bgWrapper.style.top = '0';
+        bgWrapper.style.left = '0';
+        bgWrapper.style.width = '100%';
+        bgWrapper.style.height = '100%';
+        bgWrapper.style.zIndex = '-1';
+        bgWrapper.style.background = 'var(--bg-main)';
+        bgWrapper.appendChild(canvas);
+        document.body.insertBefore(bgWrapper, document.body.firstChild);
+
+        let width, height;
+        const petals = [];
+        function resize() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        class Petal {
+            constructor() { this.respawn(); this.y = Math.random() * height; }
+            respawn() {
+                this.x = Math.random() * width;
+                this.y = -20;
+                this.size = Math.random() * 10 + 5; // 花瓣尺寸稍小
+                this.speed = Math.random() * 0.6 + 0.2; // 速度显著减慢
+                this.angle = Math.random() * 360;
+                this.spin = (Math.random() * 2 - 1) * 0.5; // 旋转减慢
+                this.color = `rgba(255, ${180 + Math.random() * 40}, ${190 + Math.random() * 40}, ${Math.random() * 0.4 + 0.2})`;
+            }
+            update() {
+                this.y += this.speed;
+                this.x += Math.sin(this.angle * Math.PI / 180) * 0.5;
+                this.angle += this.spin;
+                if (this.y > height + 20) this.respawn();
+            }
+            draw() {
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                ctx.rotate(this.angle * Math.PI / 180);
+                ctx.fillStyle = this.color;
+                ctx.beginPath();
+                ctx.moveTo(0, 0);
+                ctx.bezierCurveTo(this.size / 2, -this.size / 2, this.size, 0, 0, this.size);
+                ctx.bezierCurveTo(-this.size, 0, -this.size / 2, -this.size / 2, 0, 0);
+                ctx.fill();
+                ctx.restore();
+            }
+        }
+        for (let i = 0; i < 20; i++) petals.push(new Petal()); // 减少花瓣数量
+        function animate() {
+            ctx.clearRect(0, 0, width, height);
+            petals.forEach(p => { p.update(); p.draw(); });
+            requestAnimationFrame(animate);
+        }
+        animate();
+    }
+
+    // --- Vue 应用 ---
+    const app = createApp({
+        setup() {
+            const currentTab = ref('characters');
+            const characters = ref({});
+            const user = ref({});
+            const currentCharacter = ref('');
+            const isMock = ref(false);
+
+            const mockData = { /* ... 模拟数据保持不变 ... */ };
+
+            const loadData = () => {
+                try {
+                    const messageId = getCurrentMessageId();
+                    const vars = getVariables({ type: 'message', message_id: messageId });
+                    const data = vars.stat_data;
+                    if (data && data.characters) {
+                        characters.value = data.characters;
+                        user.value = data.user || {};
+                        currentCharacter.value = data.currentCharacter || '';
+                        isMock.value = false;
+                    } else { throw new Error("No data found"); }
+                } catch (e) {
+                    console.log("Running in mock mode.");
+                    characters.value = { "贝露": { 好感度: 185, 快感值: 45, 堕落值: 20, 初吻事件: true, 喜欢事件: true, 告白事件: true, 是否誓约: true, 原谅事件: false }, "芙兰": { 好感度: 80, 快感值: 120, 堕落值: 60, 初吻事件: false, 喜欢事件: true, 告白事件: false, 是否誓约: false, 原谅事件: true }, "梅蒂": { 好感度: -20, 快感值: 10, 堕落值: 5, 初吻事件: false, 喜欢事件: false, 告白事件: false, 是否誓约: false, 原谅事件: false } };
+                    user.value = { 爱慕级阶段角色: ["贝露", "芙兰"], 恋慕级阶段角色: ["贝露"], 已经誓约角色: ["贝露"] };
+                    currentCharacter.value = "贝露";
+                    isMock.value = true;
+                }
+            };
+
+            const switchTab = (tab) => {
+                currentTab.value = tab;
+            };
+
+            onMounted(() => {
+                initSakura();
+                loadData();
+                if (window.eventOn) {
+                    eventOn('mag_variable_update_ended', () => {
+                        console.log('Variable updated, reloading UI...');
+                        setTimeout(loadData, 200);
+                    });
+                }
+            });
+
+            return { currentTab, characters, user, currentCharacter, switchTab };
+        }
+    }).mount('#app');
+
+    // --- 折叠逻辑 ---
+    const container = document.getElementById('app-container');
+    const header = container.querySelector('.main-header');
+
+    header.addEventListener('click', () => {
+        const isExpanded = container.classList.toggle('expanded');
+
+        if (isExpanded) {
+            // 延迟以等待CSS过渡开始
+            setTimeout(() => {
+                const bars = container.querySelectorAll('.progress-fill');
+                bars.forEach(bar => {
+                    const targetWidth = bar.dataset.width || '0';
+                    gsap.to(bar, {
+                        width: targetWidth + '%',
+                        duration: 1.2,
+                        ease: 'power3.out'
+                    });
+                });
+            }, 100);
+        } else {
+            // 收起时立即重置宽度
+            const bars = container.querySelectorAll('.progress-fill');
+            bars.forEach(bar => {
+                gsap.to(bar, { width: '0%', duration: 0.3 });
+            });
+        }
+    });
+
+</script>
+
+</body>
+</html>
